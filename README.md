@@ -38,22 +38,42 @@ API runs at [http://localhost:3000](http://localhost:3000).
 
 ## API overview
 
-| Method | Path              | Description        |
-|--------|-------------------|--------------------|
-| GET    | `/`               | API info           |
-| GET    | `/health`         | Health check       |
-| GET    | `/api/streams`   | List streams       |
-| GET    | `/api/streams/:id` | Get one stream   |
-| POST   | `/api/streams`   | Create stream (body: sender, recipient, depositAmount, ratePerSecond, startTime) |
+| Method | Path                 | Auth  | Description |
+|--------|----------------------|-------|-------------|
+| GET    | `/`                  | —     | API info |
+| GET    | `/health`            | —     | Health check |
+| GET    | `/api/streams`       | —     | List streams |
+| GET    | `/api/streams/:id`   | —     | Get one stream |
+| POST   | `/api/streams`       | —     | Create stream (body: sender, recipient, depositAmount, ratePerSecond, startTime) |
+| GET    | `/api/admin/status`  | Admin | Pause flags + reindex state |
+| GET    | `/api/admin/pause`   | Admin | Read current pause flags |
+| PUT    | `/api/admin/pause`   | Admin | Update pause flags (body: streamCreation?, ingestion?) |
+| GET    | `/api/admin/reindex` | Admin | Reindex job status |
+| POST   | `/api/admin/reindex` | Admin | Trigger a reindex (202 accepted, 409 if running) |
 
 All responses are JSON. Stream data is in-memory until you add PostgreSQL.
+
+### Admin authentication
+
+Admin routes require a `Bearer` token in the `Authorization` header that matches the `ADMIN_API_KEY` environment variable. When the variable is unset, all admin endpoints return `503` (fail-closed).
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_API_KEY" http://localhost:3000/api/admin/status
+```
 
 ## Project structure
 
 ```
 src/
-  routes/     # health, streams
-  index.ts    # Express app and server
+  middleware/ # adminAuth
+  routes/     # health, streams, admin
+  state/      # adminState (pause flags, reindex tracking)
+  app.ts      # Express app setup
+  index.ts    # Server entry point
+tests/
+  middleware/ # adminAuth tests
+  routes/     # admin, health, streams tests
+  state/      # adminState tests
 ```
 
 ## Environment
@@ -61,6 +81,7 @@ src/
 Optional:
 
 - `PORT` — Server port (default: 3000)
+- `ADMIN_API_KEY` — Bearer token for admin routes (required to enable admin access)
 
 Later you can add `DATABASE_URL`, `REDIS_URL`, `HORIZON_URL`, `JWT_SECRET`, etc.
 

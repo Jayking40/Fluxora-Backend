@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { isStreamCreationPaused } from '../state/adminState.js';
 
 export const streamsRouter = Router();
 
@@ -13,6 +14,11 @@ const streams: Array<{
   status: string;
 }> = [];
 
+/** Exported for test teardown only. */
+export function _clearStreamsForTest(): void {
+  streams.length = 0;
+}
+
 streamsRouter.get('/', (_req, res) => {
   res.json({ streams });
 });
@@ -24,6 +30,13 @@ streamsRouter.get('/:id', (req, res) => {
 });
 
 streamsRouter.post('/', (req, res) => {
+  if (isStreamCreationPaused()) {
+    res.status(503).json({
+      error: 'Stream creation is temporarily paused by an administrator.',
+    });
+    return;
+  }
+
   const { sender, recipient, depositAmount, ratePerSecond, startTime } = req.body ?? {};
   const id = `stream-${Date.now()}`;
   const stream = {
