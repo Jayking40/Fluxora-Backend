@@ -1,39 +1,24 @@
 import express from 'express';
-
-import { errorHandler, notFoundHandler, requestIdMiddleware } from './errors.js';
-import { healthRouter } from './routes/health.js';
+import type { Request, Response } from 'express';
 import { streamsRouter } from './routes/streams.js';
+import { healthRouter } from './routes/health.js';
+import { correlationIdMiddleware } from './middleware/correlationId.js';
+import { requestLoggerMiddleware } from './middleware/requestLogger.js';
 
-type CreateAppOptions = {
-  includeTestRoutes?: boolean;
-};
+export const app = express();
 
-export function createApp(options: CreateAppOptions = {}) {
-  const app = express();
+app.use(express.json());
+// Correlation ID must be first so all subsequent middleware and routes have req.correlationId.
+app.use(correlationIdMiddleware);
+app.use(requestLoggerMiddleware);
 
-  app.disable('x-powered-by');
-  app.use(requestIdMiddleware);
-  app.use(express.json({ limit: '256kb' }));
+app.use('/health', healthRouter);
+app.use('/api/streams', streamsRouter);
 
-  app.use('/health', healthRouter);
-  app.use('/api/streams', streamsRouter);
-
-  app.get('/', (_req, res) => {
-    res.json({
-      name: 'Fluxora API',
-      version: '0.1.0',
-      docs: 'Programmable treasury streaming on Stellar.',
-    });
+app.get('/', (_req: Request, res: Response) => {
+  res.json({
+    name: 'Fluxora API',
+    version: '0.1.0',
+    docs: 'Programmable treasury streaming on Stellar.',
   });
-
-  if (options.includeTestRoutes) {
-    app.get('/__test/error', () => {
-      throw new Error('synthetic test failure');
-    });
-  }
-
-  app.use(notFoundHandler);
-  app.use(errorHandler);
-
-  return app;
-}
+});

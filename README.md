@@ -1,21 +1,93 @@
 # Fluxora Backend
 
-Express + TypeScript API for the Fluxora treasury streaming protocol. This repository currently exposes a minimal HTTP surface for stream CRUD and health checks. For Issue 5, the service now defines one normalized API error envelope so clients, operators, and auditors see predictable failure semantics instead of route-specific JSON shapes.
+Express + TypeScript API for the Fluxora treasury streaming protocol. Provides REST endpoints for streams, health checks, and (later) Horizon sync and analytics.
 
-## Current status
+## Decimal String Serialization Policy
 
-- Implemented today:
-  - API info endpoint
-  - health endpoint
-  - in-memory stream CRUD placeholder
-  - global API error handler with a normalized JSON envelope
-  - request id propagation via `x-request-id`
-- Explicitly not implemented yet:
-  - database-backed persistence
-  - indexing workers / chain-derived state
-  - rate limiting middleware
-  - duplicate-submission protection
-  - OpenAPI generation
+All amounts crossing the chain/API boundary are serialized as **decimal strings** to prevent precision loss in JSON.
+
+### Amount Fields
+
+- `depositAmount` - Total deposit as decimal string (e.g., "1000000.0000000")
+- `ratePerSecond` - Streaming rate as decimal string (e.g., "0.0000116")
+
+### Validation Rules
+
+- Amounts MUST be strings in decimal notation (e.g., "100", "-50", "0.0000001")
+- Native JSON numbers are rejected to prevent floating-point precision issues
+- Values exceeding safe integer ranges are rejected with `DECIMAL_OUT_OF_RANGE` error
+
+### Error Codes
+
+| Code                     | Description                               |
+| ------------------------ | ----------------------------------------- |
+| `DECIMAL_INVALID_TYPE`   | Amount was not a string                   |
+| `DECIMAL_INVALID_FORMAT` | String did not match decimal pattern      |
+| `DECIMAL_OUT_OF_RANGE`   | Value exceeds maximum supported precision |
+| `DECIMAL_EMPTY_VALUE`    | Amount was empty or null                  |
+
+### Trust Boundaries
+
+| Actor                  | Capabilities                               |
+| ---------------------- | ------------------------------------------ |
+| Public Clients         | Read streams, submit valid decimal strings |
+| Authenticated Partners | Create streams with validated amounts      |
+| Administrators         | Full access, diagnostic logging            |
+| Internal Workers       | Database operations, chain interactions    |
+
+### Failure Modes
+
+| Scenario                 | Behavior                          |
+| ------------------------ | --------------------------------- |
+| Invalid decimal type     | 400 with `DECIMAL_INVALID_TYPE`   |
+| Malformed decimal string | 400 with `DECIMAL_INVALID_FORMAT` |
+| Precision overflow       | 400 with `DECIMAL_OUT_OF_RANGE`   |
+| Missing required field   | 400 with `VALIDATION_ERROR`       |
+| Stream not found         | 404 with `NOT_FOUND`              |
+
+### Operational Notes
+
+#### Diagnostic Logging
+
+Serialization events are logged with context for debugging:
+
+```
+Decimal validation failed {"field":"depositAmount","errorCode":"DECIMAL_INVALID_TYPE","requestId":"..."}
+```
+
+#### Health Observability
+
+- `GET /health` - Returns service health status
+- Request IDs enable correlation across logs
+- Structured JSON logs for log aggregation systems
+
+#### Verification Commands
+
+```bash
+# Run all tests
+npm test
+
+# Run with coverage
+npm test -- --coverage
+
+# Build TypeScript
+npm run build
+
+# Start server
+npm start
+```
+
+### Known Limitations
+
+- In-memory stream storage (production requires database integration)
+- No Stellar RPC integration (placeholder for chain interactions)
+- Rate limiting not implemented (future enhancement)
+
+## What's in this repo
+
+- **API Gateway** — REST API for stream CRUD and health
+- **Streams API** — List, get, and create stream records (in-memory placeholder; will be replaced by PostgreSQL + Horizon listener)
+- Ready to extend with JWT, RBAC, rate limiting, and streaming engine
 
 ## Tech stack
 
@@ -48,104 +120,29 @@ API runs at [http://localhost:3000](http://localhost:3000).
 
 ## API overview
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | API info |
-| GET | `/health` | Health check |
-| GET | `/api/streams` | List streams |
-| GET | `/api/streams/:id` | Get one stream |
-| POST | `/api/streams` | Create stream with `sender`, `recipient`, `depositAmount`, `ratePerSecond`, `startTime` |
-
-All responses are JSON. Stream data is in-memory until a durable store is added.
-
-## Normalized API error JSON
-
-### Service-level outcome
-
-Every handled API failure should return the same envelope shape:
-
-```json
-{
-  "error": {
-    "code": "validation_error",
-    "message": "`recipient` is required",
-    "status": 400,
-    "requestId": "6e8f9ad8-1d9a-4ca8-9ec9-62b6ef1d56e4",
-    "details": {
-      "field": "recipient"
-    }
-  }
-}
-```
+| Method | Path               | Description                                                                      |
+| ------ | ------------------ | -------------------------------------------------------------------------------- |
+| GET    | `/`                | API info                                                                         |
+| GET    | `/health`          | Health check                                                                     |
+| GET    | `/api/streams`     | List streams                                                                     |
+| GET    | `/api/streams/:id` | Get one stream                                                                   |
+| POST   | `/api/streams`     | Create stream (body: sender, recipient, depositAmount, ratePerSecond, startTime) |
 
 Contract guarantees for this area:
 
-- every normalized error includes `code`, `message`, `status`, and `requestId`
-- route validation, invalid JSON, payload-size failures, not-found cases, and unhandled exceptions all use the same top-level error envelope
-- 5xx responses never leak raw stack traces to clients
-- the response header `x-request-id` matches the `requestId` inside the JSON body
+## Operational Guidelines
 
-### Error codes currently used
+### Trust Boundaries
+- **Public API**: The `/api/streams/lookup` endpoint is accessible to any client with stream IDs. Currently, no authentication is enforced.
+- **Failures**: Invalid JSON or missing `ids` array returns `400 Bad Request`. Non-existent IDs are silently omitted from the response to prevent information leakage and ensure robustness for partial matches.
 
-| Code | HTTP status | Meaning |
-|------|-------------|---------|
-| `validation_error` | `400` | Route-level input validation failed |
-| `invalid_json` | `400` | Request body could not be parsed as JSON |
-| `payload_too_large` | `413` | Request body exceeded the `256 KiB` JSON limit |
-| `not_found` | `404` | No route matched the request |
-| `stream_not_found` | `404` | The requested stream id does not exist |
-| `internal_error` | `500` | Unexpected server failure |
+### Health and Observability
+- **Success Metrics**: Monitor `200 OK` responses for the lookup endpoint.
+- **Error Monitoring**: Track `400` errors for client integration issues.
+- **Diagnostics**: If streams are not found, verify the stream creation logs or ensure the in-memory state hasn't been reset by a restart.
 
-### Trust boundaries
-
-| Actor | Trusted for | Not trusted for |
-|-------|-------------|-----------------|
-| Public internet clients | Sending syntactically valid requests | Choosing their own success semantics, bypassing validation, or forcing stack traces into responses |
-| Authenticated partners | Same normalized failure contract as public clients once auth exists | Receiving privileged diagnostics or internal dependency details in error bodies |
-| Administrators / operators | Correlating `requestId` values with logs and incidents | Relying on client-visible payloads alone for root-cause analysis |
-| Internal workers / future indexers | Raising typed application errors that can be normalized | Skipping the shared error contract when surfacing failures through HTTP |
-
-### Failure modes and expected client-visible behavior
-
-| Scenario | Expected client-visible behavior |
-|----------|---------------------------------|
-| Invalid JSON body | `400` with `invalid_json` |
-| Missing or malformed route fields | `400` with `validation_error` and a `details.field` hint where applicable |
-| Unknown route | `404` with `not_found` |
-| Known stream id missing | `404` with `stream_not_found` |
-| Oversized JSON body | `413` with `payload_too_large` |
-| Unhandled exception | `500` with `internal_error` and no internal stack trace |
-| Excessive request rates | Deferred: no rate limiter exists yet; once added, it must use the same envelope with `429` |
-| Duplicate submissions | Deferred: no idempotency or dedupe store exists yet; current stream creation accepts duplicates |
-| Dependency outage / partial data | Deferred in this repo version; once external dependencies exist, their failures must also normalize into the same envelope |
-
-### Abuse and reliability notes
-
-- Oversized payloads are bounded at the JSON parser with a `256 KiB` limit.
-- Excessive request rates are not yet actively throttled. This is documented as deferred rather than implied.
-- Duplicate submissions are not currently rejected. That behavior is also documented as deferred.
-- The global handler ensures that even when behavior is deferred, the failure contract for implemented paths remains predictable.
-
-### Operator observability and incident diagnosis
-
-Operators should be able to answer the following without tribal knowledge:
-
-- which request id corresponded to the failing client report
-- whether the failure was validation, parsing, routing, payload-size, or unexpected internal failure
-- whether the client saw a 4xx or a 5xx outcome
-- which route and method produced the failure
-
-Current operator signals:
-
-- `x-request-id` is generated or forwarded on every request
-- the global error handler logs:
-  - request id
-  - HTTP status
-  - normalized error code
-  - HTTP method
-  - request path
-  - internal error message
-  - structured details when present
+## Project structure
+...
 
 This is sufficient for local diagnosis now. If Redis, PostgreSQL, Horizon RPC, or workers are added later, their outage classifications should be folded into the same logging pattern.
 
@@ -186,11 +183,127 @@ Recommended follow-up issues:
 
 ```text
 src/
-  app.ts         # Express app factory and middleware wiring
-  errors.ts      # global error model and error middleware
-  routes/        # health and streams routes
-  index.ts       # server bootstrap
+  routes/     # health, streams
+  index.ts    # Express app and server
+k6/
+  main.js     # k6 entrypoint — composes all scenarios
+  config.js   # Thresholds, stage profiles, base URL
+  helpers.js  # Shared metrics, check utilities, payload generators
+  scenarios/
+    health.js          # GET /health
+    streams-list.js    # GET /api/streams
+    streams-get.js     # GET /api/streams/:id (200 + 404 paths)
+    streams-create.js  # POST /api/streams (valid + edge cases)
 ```
+
+## Load testing (k6)
+
+The `k6/` directory contains a [k6](https://k6.io/) load-testing harness for all critical endpoints.
+
+### Prerequisites
+
+Install k6 ([docs](https://grafana.com/docs/k6/latest/set-up/install-k6/)):
+
+```bash
+# macOS
+brew install k6
+
+# Windows (winget)
+winget install k6 --source winget
+
+# Windows (choco)
+choco install k6
+
+# Docker
+docker pull grafana/k6
+```
+
+### Running
+
+Start the API in one terminal:
+
+```bash
+npm run dev
+```
+
+Run a load test profile in another:
+
+```bash
+# Smoke (default — 5 VUs, 1 min, good for CI)
+npm run k6:smoke
+
+# Load (50 VUs, 5 min)
+npm run k6:load
+
+# Stress (ramp to 200 VUs)
+npm run k6:stress
+
+# Soak (30 VUs, 24 min — memory leak detection)
+npm run k6:soak
+```
+
+Override the target URL for staging/production:
+
+```bash
+k6 run -e PROFILE=load -e K6_BASE_URL=https://staging.fluxora.io k6/main.js
+```
+
+### Profiles
+
+| Profile | VUs   | Duration | Purpose                          |
+|---------|-------|----------|----------------------------------|
+| smoke   | 5     | 1 min    | CI gate / sanity check           |
+| load    | 50    | 5 min    | Pre-release regression           |
+| stress  | → 200 | 6 min    | Capacity ceiling / breaking point|
+| soak    | 30    | 24 min   | Memory leaks / drift detection   |
+
+### SLO thresholds
+
+| Metric                 | Target         |
+|------------------------|----------------|
+| p(95) response time    | < 500 ms       |
+| p(99) response time    | < 1 000 ms     |
+| Error rate             | < 1 %          |
+| Health p(99) latency   | < 200 ms       |
+
+If any threshold is breached, k6 exits with a non-zero code — suitable for CI gates.
+
+### Scenarios covered
+
+- **health** — `GET /health` readiness probe; must never fail.
+- **streams_list** — `GET /api/streams`; validates JSON array response.
+- **streams_get** — `GET /api/streams/:id`; exercises both 200 (existing) and 404 (missing) paths.
+- **streams_create** — `POST /api/streams`; valid payloads (201) and empty-body edge case.
+
+### Trust boundaries modelled
+
+| Boundary           | Endpoints                            | Notes |
+|--------------------|--------------------------------------|-------|
+| Public internet    | GET /health, GET /api/streams[/:id]  | Read-only, unauthenticated |
+| Partner (future)   | POST /api/streams                    | Auth not yet enforced — tracked as follow-up |
+
+### Failure modes tested
+
+| Mode                    | Expected client behavior           | Covered by        |
+|-------------------------|------------------------------------|--------------------|
+| Missing stream ID       | 404 `{ error: "Stream not found" }`| streams-get        |
+| Empty POST body         | Service defaults fields (201)      | streams-create     |
+| Latency degradation     | Thresholds catch p95/p99 drift     | All scenarios      |
+
+### Intentional non-goals (follow-up)
+
+- **Auth header injection**: No JWT layer yet; will add when auth middleware lands.
+- **Database failure injection**: In-memory store only; re-run after PostgreSQL migration.
+- **Stellar RPC dependency simulation**: Requires contract integration work.
+- **Rate-limiting verification**: Rate limiter not yet implemented.
+
+### Observability / incident diagnosis
+
+Operators can diagnose load-test runs via:
+
+1. **k6 terminal summary** — real-time VU count, latency percentiles, error rate.
+2. **k6 JSON output** — `k6 run --out json=results.json k6/main.js` for post-hoc analysis.
+3. **Grafana Cloud k6** — `k6 cloud k6/main.js` streams results to a dashboard (requires account).
 
 ## Environment
 
