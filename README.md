@@ -1,21 +1,104 @@
 # Fluxora Backend
 
-Express + TypeScript API for the Fluxora treasury streaming protocol. Today this repository exposes a minimal HTTP surface for stream CRUD and health checks. For Issue 44, the service now defines a concrete mapping from chain stream statuses to API-facing enums so integrators and finance reviewers do not need to reverse-engineer placeholder status strings.
+Express + TypeScript API for the Fluxora treasury streaming protocol. Today this repository exposes a minimal HTTP surface for stream CRUD and health checks. For Issue 54, the service now defines a concrete indexer-stall health classification plus an inline incident runbook so operators can reason about stale chain-derived state without relying on tribal knowledge.
 
-## Current status
+## Decimal String Serialization Policy
+
+All amounts crossing the chain/API boundary are serialized as **decimal strings** to prevent precision loss in JSON.
+
+### Amount Fields
+
+- `depositAmount` - Total deposit as decimal string (e.g., "1000000.0000000")
+- `ratePerSecond` - Streaming rate as decimal string (e.g., "0.0000116")
+
+### Validation Rules
+
+- Amounts MUST be strings in decimal notation (e.g., "100", "-50", "0.0000001")
+- Native JSON numbers are rejected to prevent floating-point precision issues
+- Values exceeding safe integer ranges are rejected with `DECIMAL_OUT_OF_RANGE` error
+
+### Error Codes
+
+| Code                     | Description                               |
+| ------------------------ | ----------------------------------------- |
+| `DECIMAL_INVALID_TYPE`   | Amount was not a string                   |
+| `DECIMAL_INVALID_FORMAT` | String did not match decimal pattern      |
+| `DECIMAL_OUT_OF_RANGE`   | Value exceeds maximum supported precision |
+| `DECIMAL_EMPTY_VALUE`    | Amount was empty or null                  |
+
+### Trust Boundaries
+
+| Actor                  | Capabilities                               |
+| ---------------------- | ------------------------------------------ |
+| Public Clients         | Read streams, submit valid decimal strings |
+| Authenticated Partners | Create streams with validated amounts      |
+| Administrators         | Full access, diagnostic logging            |
+| Internal Workers       | Database operations, chain interactions    |
+
+### Failure Modes
+
+| Scenario                 | Behavior                          |
+| ------------------------ | --------------------------------- |
+| Invalid decimal type     | 400 with `DECIMAL_INVALID_TYPE`   |
+| Malformed decimal string | 400 with `DECIMAL_INVALID_FORMAT` |
+| Precision overflow       | 400 with `DECIMAL_OUT_OF_RANGE`   |
+| Missing required field   | 400 with `VALIDATION_ERROR`       |
+| Stream not found         | 404 with `NOT_FOUND`              |
+
+### Operational Notes
+
+#### Diagnostic Logging
+
+Serialization events are logged with context for debugging:
+
+```
+Decimal validation failed {"field":"depositAmount","errorCode":"DECIMAL_INVALID_TYPE","requestId":"..."}
+```
+
+#### Health Observability
+
+- `GET /health` - Returns service health status
+- Request IDs enable correlation across logs
+- Structured JSON logs for log aggregation systems
+
+#### Verification Commands
+
+```bash
+# Run all tests
+npm test
+
+# Run with coverage
+npm test -- --coverage
+
+# Build TypeScript
+npm run build
+
+# Start server
+npm start
+```
+
+### Known Limitations
+
+- In-memory stream storage (production requires database integration)
+- No Stellar RPC integration (placeholder for chain interactions)
+- Rate limiting not implemented (future enhancement)
+
+## What's in this repo
 
 - Implemented today:
   - API info endpoint
   - health endpoint
   - in-memory stream CRUD placeholder
-  - explicit chain-to-API stream status mapping
-  - tested status-mapping utility used by stream responses
+  - indexer freshness classification for `healthy`, `starting`, `stalled`, and `not_configured`
+  - health-route reporting for indexer freshness
 - Explicitly not implemented yet:
-  - real chain ingestion
-  - persistent stream state
-  - indexer-backed checkpointing
-  - duplicate-event protection
-  - OpenAPI generation
+  - a real indexer worker
+  - durable checkpoint persistence
+  - database-backed chain state
+  - automated restart orchestration
+  - rate limiting or duplicate-delivery protection
+
+If the health route reports `indexer.status = "stalled"`, treat that as an operational signal that chain-derived views would be stale if the real indexer were enabled in this service.
 
 ## Tech stack
 
@@ -43,125 +126,48 @@ API runs at [http://localhost:3000](http://localhost:3000).
 
 - `npm run dev` - run with tsx watch
 - `npm run build` - compile to `dist/`
-- `npm test` - build and run stream-status mapping assertions
+- `npm test` - run the HTTP error-handling tests
 - `npm start` - run compiled `dist/index.js`
 
 ## API overview
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | API info |
-| GET | `/health` | Health check |
-| GET | `/api/streams` | List streams |
-| GET | `/api/streams/:id` | Get one stream |
-| POST | `/api/streams` | Create stream with `sender`, `recipient`, `depositAmount`, `ratePerSecond`, `startTime`, optional `chainStatus` |
+| Method | Path               | Description                                                                      |
+| ------ | ------------------ | -------------------------------------------------------------------------------- |
+| GET    | `/`                | API info                                                                         |
+| GET    | `/health`          | Health check                                                                     |
+| GET    | `/api/streams`     | List streams                                                                     |
+| GET    | `/api/streams/:id` | Get one stream                                                                   |
+| POST   | `/api/streams`     | Create stream (body: sender, recipient, depositAmount, ratePerSecond, startTime) |
 
-All responses are JSON. Stream data is in-memory until a durable store is added.
+Contract guarantees for this area:
 
-## Stream status mapping: chain -> API enums
+## Operational Guidelines
 
-### Service-level outcome
+### Trust Boundaries
+- **Public API**: The `/api/streams/lookup` endpoint is accessible to any client with stream IDs. Currently, no authentication is enforced.
+- **Failures**: Invalid JSON or missing `ids` array returns `400 Bad Request`. Non-existent IDs are silently omitted from the response to prevent information leakage and ensure robustness for partial matches.
 
-The single responsibility area for this issue is the normalization of chain-level stream state into API-facing enums. The service-level outcomes are:
+### Health and Observability
+- **Success Metrics**: Monitor `200 OK` responses for the lookup endpoint.
+- **Error Monitoring**: Track `400` errors for client integration issues.
+- **Diagnostics**: If streams are not found, verify the stream creation logs or ensure the in-memory state hasn't been reset by a restart.
 
-- API responses must expose a stable API enum vocabulary instead of arbitrary raw chain strings
-- raw chain status may still be surfaced for debugging, but the API enum is the contract consumers should code against
-- terminal chain outcomes must remain unambiguous for finance and audit consumers
-- unknown or invalid chain statuses must be rejected instead of silently guessed
+## Project structure
+...
 
-### Supported mapping
-
-The backend currently supports these chain statuses:
-
-| Chain status | API status | Terminal | Notes |
-|-------------|------------|----------|-------|
-| `pending` | `scheduled` | No | Stream exists on chain but has not started yet |
-| `active` | `active` | No | Stream is flowing normally |
-| `paused` | `paused` | No | Stream is temporarily stopped |
-| `completed` | `completed` | Yes | Stream ended normally |
-| `cancelled` | `cancelled` | Yes | Stream ended by cancellation |
-| `depleted` | `completed` | Yes | Terminal via depletion; surfaced as `statusReason: "depleted"` |
-
-API enum vocabulary:
-
-- `scheduled`
-- `active`
-- `paused`
-- `completed`
-- `cancelled`
-
-### API shape
-
-Example stream response:
-
-```json
-{
-  "id": "stream-1710000000",
-  "sender": "GABC...",
-  "recipient": "GDEF...",
-  "depositAmount": "1000",
-  "ratePerSecond": "5",
-  "startTime": 1710000000,
-  "chainStatus": "depleted",
-  "status": "completed",
-  "terminal": true,
-  "statusReason": "depleted"
-}
-```
-
-Placeholder behavior in this repo:
-
-- if `chainStatus` is omitted on stream creation and `startTime` is in the future, the placeholder defaults to `pending`
-- if `chainStatus` is omitted and `startTime` is now or in the past, the placeholder defaults to `active`
-- if `chainStatus` is provided and invalid, the API returns `400`
-
-### Trust boundaries
-
-| Actor | Trusted for | Not trusted for |
-|-------|-------------|-----------------|
-| Public internet clients | Reading the normalized API enum | Defining their own chain-status vocabulary or assuming omitted chain data is authoritative |
-| Authenticated partners | Integrating against the stable API enum contract | Treating placeholder defaults as authoritative chain truth once a real indexer exists |
-| Administrators / operators | Diagnosing mismatches between raw chain status and API enum | Overriding the mapping without code or documentation changes |
-| Internal workers / future indexers | Supplying valid chain statuses to the mapper | Emitting unknown status strings and expecting the API to guess safely |
-
-### Failure modes and expected client-visible behavior
-
-| Scenario | Expected behavior |
-|----------|-------------------|
-| Valid known chain status | API returns the mapped enum and terminal metadata |
-| Omitted chain status in placeholder create flow | API derives `pending` or `active` from `startTime` |
-| Invalid chain status on create | API returns `400` with the allowed chain statuses |
-| Unknown chain status from a future worker | Must be rejected until the mapping is explicitly extended |
-| Dependency outage / partial chain data | Deferred in this repo version; do not invent a chain status when the source of truth is unavailable |
-| Duplicate delivery / duplicate event application | Deferred; no durable indexer or dedupe path exists in this repo version |
-| Terminal stream depletion | API reports `status: "completed"` plus `statusReason: "depleted"` so consumers can distinguish depletion from a normal completion |
-
-### Operator observability and diagnosis
-
-Operators should be able to answer the following without tribal knowledge:
-
-- which raw chain status entered the backend
-- which API status was exposed to consumers
-- whether the mapped status is terminal
-- whether a terminal status was a normal completion, cancellation, or depletion
-
-Current observability in this repo:
-
-- the stream API now returns both `chainStatus` and normalized `status`
-- terminal metadata is explicit via `terminal`
-- depletion is explicit via `statusReason: "depleted"`
-
-This is sufficient for the placeholder service. Once a real chain indexer exists, the same mapping should be reused instead of inventing a second status vocabulary.
+This is sufficient for local diagnosis now. If Redis, PostgreSQL, Horizon RPC, or workers are added later, their outage classifications should be folded into the same logging pattern.
 
 ### Verification evidence
 
-Automated assertions in `src/streams/status.test.ts` cover:
+Automated tests in `src/app.test.ts` cover:
 
-- `pending -> scheduled`
-- `depleted -> completed` with `statusReason: "depleted"`
-- placeholder defaulting for future and current/past start times
+- normalized `404` for unknown routes
+- normalized `400` for invalid JSON
+- normalized `413` for oversized payloads
+- normalized `400` for route validation failures
+- normalized `500` for unexpected exceptions
 
-Validation commands:
+Build verification:
 
 ```bash
 npm test
@@ -172,26 +178,143 @@ npm run build
 
 Intentionally deferred in this issue:
 
-- real chain ingestion
-- worker / indexer integration
-- durable stream persistence
-- OpenAPI publication
+- rate limiting implementation
+- duplicate-submission detection
+- persistence-backed failure classification
+- OpenAPI generation for error schemas
 
 Recommended follow-up issues:
 
-- connect the same mapping utility to a real chain indexer
-- add route-level integration tests once a reusable app/test harness exists on `main`
-- document the mapping in OpenAPI once the API surface stabilizes
-- classify dependency-outage behavior once real chain state exists
+- add rate limiting that returns normalized `429` errors
+- add idempotency / duplicate-submission protection
+- publish OpenAPI schemas for the normalized error envelope
+- extend dependency-outage classification once real database / indexing integrations land
 
 ## Project structure
 
 ```text
 src/
-  routes/         # health and streams routes
-  streams/        # chain-to-API status mapping
-  index.ts        # Express app and server
+  routes/     # health, streams
+  index.ts    # Express app and server
+k6/
+  main.js     # k6 entrypoint — composes all scenarios
+  config.js   # Thresholds, stage profiles, base URL
+  helpers.js  # Shared metrics, check utilities, payload generators
+  scenarios/
+    health.js          # GET /health
+    streams-list.js    # GET /api/streams
+    streams-get.js     # GET /api/streams/:id (200 + 404 paths)
+    streams-create.js  # POST /api/streams (valid + edge cases)
 ```
+
+## Load testing (k6)
+
+The `k6/` directory contains a [k6](https://k6.io/) load-testing harness for all critical endpoints.
+
+### Prerequisites
+
+Install k6 ([docs](https://grafana.com/docs/k6/latest/set-up/install-k6/)):
+
+```bash
+# macOS
+brew install k6
+
+# Windows (winget)
+winget install k6 --source winget
+
+# Windows (choco)
+choco install k6
+
+# Docker
+docker pull grafana/k6
+```
+
+### Running
+
+Start the API in one terminal:
+
+```bash
+npm run dev
+```
+
+Run a load test profile in another:
+
+```bash
+# Smoke (default — 5 VUs, 1 min, good for CI)
+npm run k6:smoke
+
+# Load (50 VUs, 5 min)
+npm run k6:load
+
+# Stress (ramp to 200 VUs)
+npm run k6:stress
+
+# Soak (30 VUs, 24 min — memory leak detection)
+npm run k6:soak
+```
+
+Override the target URL for staging/production:
+
+```bash
+k6 run -e PROFILE=load -e K6_BASE_URL=https://staging.fluxora.io k6/main.js
+```
+
+### Profiles
+
+| Profile | VUs   | Duration | Purpose                          |
+|---------|-------|----------|----------------------------------|
+| smoke   | 5     | 1 min    | CI gate / sanity check           |
+| load    | 50    | 5 min    | Pre-release regression           |
+| stress  | → 200 | 6 min    | Capacity ceiling / breaking point|
+| soak    | 30    | 24 min   | Memory leaks / drift detection   |
+
+### SLO thresholds
+
+| Metric                 | Target         |
+|------------------------|----------------|
+| p(95) response time    | < 500 ms       |
+| p(99) response time    | < 1 000 ms     |
+| Error rate             | < 1 %          |
+| Health p(99) latency   | < 200 ms       |
+
+If any threshold is breached, k6 exits with a non-zero code — suitable for CI gates.
+
+### Scenarios covered
+
+- **health** — `GET /health` readiness probe; must never fail.
+- **streams_list** — `GET /api/streams`; validates JSON array response.
+- **streams_get** — `GET /api/streams/:id`; exercises both 200 (existing) and 404 (missing) paths.
+- **streams_create** — `POST /api/streams`; valid payloads (201) and empty-body edge case.
+
+### Trust boundaries modelled
+
+| Boundary           | Endpoints                            | Notes |
+|--------------------|--------------------------------------|-------|
+| Public internet    | GET /health, GET /api/streams[/:id]  | Read-only, unauthenticated |
+| Partner (future)   | POST /api/streams                    | Auth not yet enforced — tracked as follow-up |
+
+### Failure modes tested
+
+| Mode                    | Expected client behavior           | Covered by        |
+|-------------------------|------------------------------------|--------------------|
+| Missing stream ID       | 404 `{ error: "Stream not found" }`| streams-get        |
+| Empty POST body         | Service defaults fields (201)      | streams-create     |
+| Latency degradation     | Thresholds catch p95/p99 drift     | All scenarios      |
+
+### Intentional non-goals (follow-up)
+
+- **Auth header injection**: No JWT layer yet; will add when auth middleware lands.
+- **Database failure injection**: In-memory store only; re-run after PostgreSQL migration.
+- **Stellar RPC dependency simulation**: Requires contract integration work.
+- **Rate-limiting verification**: Rate limiter not yet implemented.
+
+### Observability / incident diagnosis
+
+Operators can diagnose load-test runs via:
+
+1. **k6 terminal summary** — real-time VU count, latency percentiles, error rate.
+2. **k6 JSON output** — `k6 run --out json=results.json k6/main.js` for post-hoc analysis.
+3. **Grafana Cloud k6** — `k6 cloud k6/main.js` streams results to a dashboard (requires account).
 
 ## Environment
 
