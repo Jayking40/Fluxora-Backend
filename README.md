@@ -61,6 +61,44 @@ Decimal validation failed {"field":"depositAmount","errorCode":"DECIMAL_INVALID_
 - Request IDs enable correlation across logs
 - Structured JSON logs for log aggregation systems
 
+### `/api/streams` Cursor Pagination Contract
+
+`GET /api/streams` now uses opaque forward-only cursors returned as `next_cursor`. Clients must treat the cursor as an opaque token, not a stream ID or sortable value. Pages are ordered by ascending `id`, return at most `limit` items, and include `total` for the current list view.
+
+Service outcomes for this endpoint:
+
+- A successful page is read from the current in-process stream view and never duplicates an item within that page.
+- Reusing a valid cursor is safe and resumes strictly after the encoded sort key.
+- If the last-seen stream is deleted between requests, the cursor still resumes after that key instead of failing stale.
+- If the listing dependency is unavailable, the service returns `503 SERVICE_UNAVAILABLE` with a request ID for tracing.
+
+Trust boundaries for this area:
+
+- Public clients may read paginated stream listings only.
+- Authenticated partners consume the same read contract and must not infer internal state from cursors.
+- Administrators diagnose failures through structured logs, request IDs, and `/health`; they do not receive privileged response bodies from this endpoint.
+- Internal workers may refresh the backing view, but duplicate deliveries are absorbed by deterministic ordering plus opaque cursor progression.
+
+Failure modes and client-visible behavior:
+
+- Invalid `limit` or malformed `cursor`: `400 VALIDATION_ERROR`
+- Missing stream on `GET /api/streams/:id`: `404 NOT_FOUND`
+- Conflicting cancellation on `DELETE /api/streams/:id`: `409 CONFLICT`
+- Listing dependency degraded or unavailable: `503 SERVICE_UNAVAILABLE`
+- Unexpected process error: `500 INTERNAL_ERROR`
+
+Operator notes:
+
+- Use the response `requestId` to correlate client failures with stream pagination logs.
+- `/health` only confirms process liveness today; pagination dependency health is surfaced by request logs and 503 responses.
+- Representative regression coverage lives in `tests/streams.test.ts`, including malformed cursor handling, deleted-cursor recovery, and dependency-unavailable behavior.
+
+Intentional non-goals in this issue:
+
+- Replacing the in-memory store with a durable database view
+- Adding authentication or role-based authorization to `/api/streams`
+- Exposing page tokens in any format other than the opaque cursor contract
+
 #### Verification Commands
 
 ```bash

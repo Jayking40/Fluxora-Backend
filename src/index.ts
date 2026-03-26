@@ -12,13 +12,14 @@
  * @module index
  */
 
-import express, { Request, Response, NextFunction } from 'express';
+import express from 'express';
 import { streamsRouter } from './routes/streams.js';
 import { healthRouter } from './routes/health.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { requestIdMiddleware, info, warn } from './utils/logger.js';
 
 const PORT = process.env.PORT ?? 3000;
+const app = express();
 
 // Trust boundary: Add request ID for tracing
 app.use(requestIdMiddleware);
@@ -27,8 +28,8 @@ app.use(requestIdMiddleware);
 app.use(express.json({ limit: '1mb' }));
 
 // Trust boundary: Log all requests
-app.use((req: Request, _res: Response, next: NextFunction) => {
-  const requestId = (req as Request & { id?: string }).id;
+app.use((req: any, _res: any, next: any) => {
+  const requestId = req.id;
   info('Incoming request', {
     method: req.method,
     path: req.path,
@@ -46,7 +47,7 @@ app.use('/health', healthRouter);
 app.use('/api/streams', streamsRouter);
 
 // Root endpoint with API documentation
-app.get('/', (_req: Request, res: Response) => {
+app.get('/', (_req: any, res: any) => {
   res.json({
     name: 'Fluxora API',
     version: '0.1.0',
@@ -64,7 +65,7 @@ app.get('/', (_req: Request, res: Response) => {
 });
 
 // Trust boundary: 404 handler for unknown routes
-app.use((_req: Request, res: Response) => {
+app.use((_req: any, res: any) => {
   res.status(404).json({
     error: {
       code: 'NOT_FOUND',
@@ -76,8 +77,8 @@ app.use((_req: Request, res: Response) => {
 // Global error handler (must be last)
 // Catches all errors and returns consistent JSON responses
 // Trust boundary: Never exposes internal error details in production
-app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
-  const requestId = (req as Request & { id?: string }).id;
+app.use((err: Error, req: any, res: any, _next: any) => {
+  const requestId = req.id;
   
   // Handle JSON parsing errors
   if (err instanceof SyntaxError && 'body' in err) {

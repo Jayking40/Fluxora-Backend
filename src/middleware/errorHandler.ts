@@ -91,9 +91,9 @@ function getDecimalErrorApiCode(code: DecimalErrorCode): ApiErrorCode {
  */
 export function errorHandler(
   err: Error,
-  req: Request,
-  res: Response,
-  _next: NextFunction
+  req: any,
+  res: any,
+  _next: any
 ): void {
   const requestId = (req as Request & { id?: string }).id;
 
@@ -167,10 +167,10 @@ export function errorHandler(
  * Async handler wrapper to catch errors in async route handlers
  */
 export function asyncHandler(
-  fn: (req: Request, res: Response, next: NextFunction) => Promise<void>
+  fn: (req: any, res: any, next: any) => Promise<void>
 ) {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    Promise.resolve(fn(req, res, next)).catch(next);
+  return (req: any, res: any, next: any): void => {
+    Promise.resolve(fn(req, res, next)).catch((error) => next(error));
   };
 }
 
