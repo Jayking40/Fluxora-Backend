@@ -63,12 +63,14 @@ Decimal validation failed {"field":"depositAmount","errorCode":"DECIMAL_INVALID_
 
 ### `/api/streams` Cursor Pagination Contract
 
-`GET /api/streams` now uses opaque forward-only cursors returned as `next_cursor`. Clients must treat the cursor as an opaque token, not a stream ID or sortable value. Pages are ordered by ascending `id`, return at most `limit` items, and include `total` for the current list view.
+`GET /api/streams` now uses opaque forward-only cursors returned as `next_cursor`. Clients must treat the cursor as an opaque token, not a stream ID or sortable value. Pages are ordered by ascending `id`, return at most `limit` items, and always expose `has_more` as the authoritative traversal signal. `total` is now opt-in via `include_total=true` and represents response-time metadata only, not a cursor snapshot guarantee.
 
 Service outcomes for this endpoint:
 
 - A successful page is read from the current in-process stream view and never duplicates an item within that page.
 - Reusing a valid cursor is safe and resumes strictly after the encoded sort key.
+- Cursor traversal correctness is determined by `next_cursor` and `has_more`, not by `total`.
+- If `include_total=true`, `total` reflects the number of matching streams visible when that specific response was generated and may change between cursor requests.
 - If the last-seen stream is deleted between requests, the cursor still resumes after that key instead of failing stale.
 - If the listing dependency is unavailable, the service returns `503 SERVICE_UNAVAILABLE` with a request ID for tracing.
 
@@ -81,7 +83,7 @@ Trust boundaries for this area:
 
 Failure modes and client-visible behavior:
 
-- Invalid `limit` or malformed `cursor`: `400 VALIDATION_ERROR`
+- Invalid `limit`, malformed `cursor`, or invalid `include_total`: `400 VALIDATION_ERROR`
 - Missing stream on `GET /api/streams/:id`: `404 NOT_FOUND`
 - Conflicting cancellation on `DELETE /api/streams/:id`: `409 CONFLICT`
 - Listing dependency degraded or unavailable: `503 SERVICE_UNAVAILABLE`
@@ -91,7 +93,8 @@ Operator notes:
 
 - Use the response `requestId` to correlate client failures with stream pagination logs.
 - `/health` only confirms process liveness today; pagination dependency health is surfaced by request logs and 503 responses.
-- Representative regression coverage lives in `tests/streams.test.ts`, including malformed cursor handling, deleted-cursor recovery, and dependency-unavailable behavior.
+- Logs distinguish whether `total` was requested so operators can diagnose expensive or confused client pagination patterns.
+- Representative regression coverage lives in `tests/streams.test.ts`, including malformed cursor handling, deleted-cursor recovery, changing response-time totals, and dependency-unavailable behavior.
 
 ### `/api/streams` POST Idempotency Contract
 
