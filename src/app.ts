@@ -2,6 +2,7 @@ import express from 'express';
 import type { Request, Response } from 'express';
 import { streamsRouter } from './routes/streams.js';
 import { healthRouter } from './routes/health.js';
+import { auditRouter } from './routes/audit.js';
 import { correlationIdMiddleware } from './middleware/correlationId.js';
 import { requestLoggerMiddleware } from './middleware/requestLogger.js';
 
@@ -14,6 +15,7 @@ app.use(requestLoggerMiddleware);
 
 app.use('/health', healthRouter);
 app.use('/api/streams', streamsRouter);
+app.use('/api/audit', auditRouter);
 
 app.get('/', (_req: Request, res: Response) => {
   res.json({

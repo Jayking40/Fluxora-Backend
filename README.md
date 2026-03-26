@@ -83,6 +83,74 @@ npm start
 - No Stellar RPC integration (placeholder for chain interactions)
 - Rate limiting not implemented (future enhancement)
 
+## Audit Log
+
+Sensitive state-changing operations are recorded in an append-only in-memory audit log.
+
+### Audited Actions
+
+| Action             | Trigger                        |
+| ------------------ | ------------------------------ |
+| `STREAM_CREATED`   | `POST /api/streams` succeeds   |
+| `STREAM_CANCELLED` | `DELETE /api/streams/:id` succeeds |
+
+### Entry Shape
+
+```json
+{
+  "seq": 1,
+  "timestamp": "2026-03-26T11:00:00.000Z",
+  "action": "STREAM_CREATED",
+  "resourceType": "stream",
+  "resourceId": "stream-1234",
+  "correlationId": "x-correlation-id from request",
+  "meta": {
+    "sender": "GCSX2...",
+    "recipient": "GDRX2...",
+    "depositAmount": "1000.0000000",
+    "ratePerSecond": "0.0000116"
+  }
+}
+```
+
+### Trust Boundaries
+
+| Actor                  | Access                                      |
+| ---------------------- | ------------------------------------------- |
+| Public clients         | No access to audit log                      |
+| Authenticated partners | No access to audit log                      |
+| Administrators         | `GET /api/audit` — read all entries         |
+| Internal workers       | Call `recordAuditEvent` directly            |
+
+### Failure Modes
+
+| Scenario                        | Behavior                                              |
+| ------------------------------- | ----------------------------------------------------- |
+| Audit write fails internally    | Error logged to stderr; primary operation unaffected  |
+| No entries recorded yet         | `GET /api/audit` returns `{ entries: [], total: 0 }` |
+| Stream creation fails validation | No audit entry recorded                              |
+
+### API
+
+```
+GET /api/audit
+```
+
+Response: `{ entries: AuditEntry[], total: number }`
+
+### Operational Notes
+
+- Entries are append-only within the process lifetime; `seq` is monotonically increasing.
+- `correlationId` is propagated from the `x-correlation-id` request header into each entry, enabling cross-log tracing.
+- Audit events are emitted as structured JSON log lines at `info` level: `Audit event recorded { action, resourceType, resourceId }`.
+
+### Non-goals (follow-up)
+
+- Persistent storage (PostgreSQL audit table) — tracked as future work.
+- Pagination / filtering on `GET /api/audit`.
+- Tamper-evidence / cryptographic chaining of entries.
+- Authorization enforcement on `GET /api/audit` (requires auth middleware, not yet implemented).
+
 ## What's in this repo
 
 - **API Gateway** — REST API for stream CRUD and health

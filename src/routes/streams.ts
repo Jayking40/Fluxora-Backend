@@ -12,6 +12,7 @@ import {
   asyncHandler,
 } from '../middleware/errorHandler.js';
 import { SerializationLogger, info, debug } from '../utils/logger.js';
+import { recordAuditEvent } from '../lib/auditLog.js';
 
 /**
  * @openapi
@@ -385,6 +386,13 @@ streamsRouter.post(
     SerializationLogger.amountSerialized(2, requestId);
     info('Stream created', { id, requestId });
 
+    recordAuditEvent('STREAM_CREATED', 'stream', id, req.correlationId, {
+      sender: stream.sender,
+      recipient: stream.recipient,
+      depositAmount: stream.depositAmount,
+      ratePerSecond: stream.ratePerSecond,
+    });
+
     res.status(201).json(stream);
   })
 );
@@ -434,6 +442,8 @@ streamsRouter.delete(
     streams[index] = { ...stream, status: 'cancelled' };
 
     info('Stream cancelled', { id, requestId });
+
+    recordAuditEvent('STREAM_CANCELLED', 'stream', id, req.correlationId);
 
     res.json({ message: 'Stream cancelled', id });
   })
