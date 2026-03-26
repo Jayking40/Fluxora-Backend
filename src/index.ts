@@ -18,7 +18,6 @@ import { healthRouter } from './routes/health.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { requestIdMiddleware, info, warn } from './utils/logger.js';
 
-const app = express();
 const PORT = process.env.PORT ?? 3000;
 
 // Trust boundary: Add request ID for tracing
