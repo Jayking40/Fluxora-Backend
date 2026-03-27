@@ -25,7 +25,7 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
 app.use('/health', healthRouter);
 app.use('/api/streams', streamsRouter);
 
-app.get('/', (_req: Request, res: Response) => {
+app.get('/', (_req: any, res: any) => {
   res.json({
     name: 'Fluxora API',
     version: '0.1.0',

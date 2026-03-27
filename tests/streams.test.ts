@@ -7,16 +7,16 @@
  * @file streams.test.ts
  */
 
-import express, { Application } from 'express';
+import express from 'express';
 import request from 'supertest';
 
 // Import the streams router directly - we'll need to export the streams array for testing
-import { streamsRouter } from '../src/routes/streams.js';
+import { streamsRouter, streams, setStreamListingDependencyState } from '../src/routes/streams.js';
 import { errorHandler } from '../src/middleware/errorHandler.js';
 import { requestIdMiddleware } from '../src/utils/logger.js';
 
 // Create a minimal test app
-function createTestApp(): Application {
+function createTestApp() {
   const app = express();
   app.use(requestIdMiddleware);
   app.use(express.json());
@@ -26,10 +26,12 @@ function createTestApp(): Application {
 }
 
 describe('Streams API - Decimal String Serialization', () => {
-  let app: Application;
+  let app: any;
 
   beforeEach(() => {
     app = createTestApp();
+    streams.length = 0;
+    setStreamListingDependencyState('healthy');
   });
 
   describe('POST /api/streams', () => {
@@ -299,7 +301,38 @@ describe('Streams API - Decimal String Serialization', () => {
   });
 
   describe('GET /api/streams', () => {
-    it('should return streams array with count', async () => {
+    beforeEach(async () => {
+      // Create some test streams for pagination testing
+      const testStreams = [
+        {
+          sender: 'GCSX2XXXXXXXXXXXXXXXXXXXXXXX',
+          recipient: 'GDRX2XXXXXXXXXXXXXXXXXXXXXXX',
+          depositAmount: '1000.0000000',
+          ratePerSecond: '0.0000116',
+        },
+        {
+          sender: 'GCSX3XXXXXXXXXXXXXXXXXXXXXXX',
+          recipient: 'GDRX3XXXXXXXXXXXXXXXXXXXXXXX',
+          depositAmount: '2000.0000000',
+          ratePerSecond: '0.0000232',
+        },
+        {
+          sender: 'GCSX4XXXXXXXXXXXXXXXXXXXXXXX',
+          recipient: 'GDRX4XXXXXXXXXXXXXXXXXXXXXXX',
+          depositAmount: '3000.0000000',
+          ratePerSecond: '0.0000348',
+        },
+      ];
+
+      for (const stream of testStreams) {
+        await request(app)
+          .post('/api/streams')
+          .send(stream)
+          .expect(201);
+      }
+    });
+
+    it('should return streams array with pagination metadata', async () => {
       const response = await request(app)
         .get('/api/streams')
         .expect(200);
@@ -308,6 +341,102 @@ describe('Streams API - Decimal String Serialization', () => {
       expect(Array.isArray(response.body.streams)).toBe(true);
       expect(response.body.total).toBeDefined();
       expect(typeof response.body.total).toBe('number');
+      expect(response.body.streams.length).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should return all streams when no pagination parameters', async () => {
+      const response = await request(app)
+        .get('/api/streams')
+        .expect(200);
+
+      expect(response.body.streams.length).toBe(3);
+      expect(response.body.total).toBe(3);
+      expect(response.body.next_cursor).toBeUndefined();
+    });
+
+    it('should support limit parameter', async () => {
+      const response = await request(app)
+        .get('/api/streams?limit=2')
+        .expect(200);
+
+      expect(response.body.streams.length).toBe(2);
+      expect(response.body.total).toBe(3);
+      expect(response.body.next_cursor).toBeDefined();
+    });
+
+    it('should support cursor pagination', async () => {
+      const firstPage = await request(app)
+        .get('/api/streams?limit=2')
+        .expect(200);
+
+      expect(firstPage.body.streams.length).toBe(2);
+      expect(firstPage.body.next_cursor).toBeDefined();
+
+      const secondPage = await request(app)
+        .get(`/api/streams?cursor=${firstPage.body.next_cursor}&limit=2`)
+        .expect(200);
+
+      expect(secondPage.body.streams.length).toBe(1);
+      expect(secondPage.body.next_cursor).toBeUndefined();
+    });
+
+    it('should resume from the encoded sort key when the cursor record disappears', async () => {
+      const firstPage = await request(app)
+        .get('/api/streams?limit=2')
+        .expect(200);
+
+      const deletedId = firstPage.body.streams[1].id;
+      const deletedIndex = streams.findIndex((stream) => stream.id === deletedId);
+      streams.splice(deletedIndex, 1);
+
+      const secondPage = await request(app)
+        .get(`/api/streams?cursor=${firstPage.body.next_cursor}&limit=2`)
+        .expect(200);
+
+      expect(secondPage.body.streams).toHaveLength(1);
+      expect(secondPage.body.streams[0].id).not.toBe(deletedId);
+    });
+
+    it('should reject invalid limit values', async () => {
+      const response = await request(app)
+        .get('/api/streams?limit=0')
+        .expect(400);
+
+      expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    });
+
+    it('should reject limit > 100', async () => {
+      const response = await request(app)
+        .get('/api/streams?limit=101')
+        .expect(400);
+
+      expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    });
+
+    it('should reject non-integer limit values', async () => {
+      const response = await request(app)
+        .get('/api/streams?limit=1.5')
+        .expect(400);
+
+      expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    });
+
+    it('should reject invalid cursor', async () => {
+      const response = await request(app)
+        .get('/api/streams?cursor=invalid-cursor')
+        .expect(400);
+
+      expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    });
+
+    it('should return 503 when the listing dependency is unavailable', async () => {
+      setStreamListingDependencyState('unavailable');
+
+      const response = await request(app)
+        .get('/api/streams')
+        .expect(503);
+
+      expect(response.body.error.code).toBe('SERVICE_UNAVAILABLE');
     });
 
     it('should include requestId in response', async () => {
@@ -340,7 +469,7 @@ describe('Streams API - Decimal String Serialization', () => {
 });
 
 describe('Error Handler Integration', () => {
-  let app: Application;
+  let app: any;
 
   beforeEach(() => {
     app = createTestApp();

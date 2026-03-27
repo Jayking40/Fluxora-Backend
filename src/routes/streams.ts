@@ -1,14 +1,14 @@
-import { Router, Request, Response } from 'express';
+import { Router } from 'express';
 import {
   validateDecimalString,
   validateAmountFields,
-  DecimalSerializationError,
 } from '../serialization/decimal.js';
 import {
   ApiError,
   ApiErrorCode,
   notFound,
   validationError,
+  serviceUnavailable,
   asyncHandler,
 } from '../middleware/errorHandler.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -18,15 +18,49 @@ import { SerializationLogger, info, debug } from '../utils/logger.js';
  * @openapi
  * /api/streams:
  *   get:
- *     summary: List all streams
+ *     summary: List streams with cursor pagination
  *     description: |
- *       Returns all active streaming payment streams.
+ *       Returns active streaming payment streams with cursor-based pagination.
  *       All amount fields are serialized as decimal strings for precision.
+ *       
+ *       Pagination uses opaque forward-only cursors for efficient large result sets.
+ *       Results are ordered by ascending stream ID. Clients must treat `next_cursor`
+ *       as an opaque token and must not derive meaning from its contents.
+ *       
+ *       Service-level outcomes:
+ *       - A successful page is a stable prefix of the current in-process stream view.
+ *       - Replaying the same cursor is safe and does not create duplicate records within a page.
+ *       - If the last-seen stream disappears between requests, the cursor still resumes after
+ *         the encoded sort key instead of failing as stale.
+ *       - If the listing dependency is unavailable, the service fails closed with 503.
+ *       
+ *       Trust boundaries for this endpoint:
+ *       - Public internet clients may list streams but may not mutate server-side pagination state.
+ *       - Authenticated partners consume the same read contract and must treat cursors as opaque.
+ *       - Administrators diagnose incidents through request IDs and structured logs; they do not
+ *         receive elevated response payloads.
+ *       - Internal workers may refresh the backing view but are not exposed through this route.
  *     tags:
  *       - streams
+ *     parameters:
+ *       - name: cursor
+ *         in: query
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Opaque cursor returned by a prior page
+ *       - name: limit
+ *         in: query
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 50
+ *         description: Maximum number of streams to return (1-100, default 50)
  *     responses:
  *       200:
- *         description: List of streams
+ *         description: Paginated list of streams
  *         content:
  *           application/json:
  *             schema:
@@ -36,6 +70,25 @@ import { SerializationLogger, info, debug } from '../utils/logger.js';
  *                   type: array
  *                   items:
  *                     $ref: '#/components/schemas/Stream'
+ *                 total:
+ *                   type: integer
+ *                   description: Total number of streams in the current list view
+ *                 next_cursor:
+ *                   type: string
+ *                   description: Opaque cursor for the next page (omitted if no more results)
+ *                   example: "eyJ2IjoxLCJsYXN0SWQiOiJzdHJlYW0tMTcwOTEyMzQ1Njc4OS1hYmMxMiJ9"
+ *       400:
+ *         description: Invalid pagination parameters
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       503:
+ *         description: Stream listing dependency unavailable
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  *       500:
  *         description: Internal server error
  *         content:
@@ -223,7 +276,7 @@ export const streamsRouter = Router();
 const AMOUNT_FIELDS = ['depositAmount', 'ratePerSecond'] as const;
 
 // In-memory stream store (placeholder for DB integration)
-const streams: Array<{
+export const streams: Array<{
   id: string;
   sender: string;
   recipient: string;
@@ -234,20 +287,139 @@ const streams: Array<{
   status: string;
 }> = [];
 
+type StreamsCursor = {
+  v: 1;
+  lastId: string;
+};
+
+type StreamListingDependencyState = 'healthy' | 'unavailable';
+
+const streamListingDependency = {
+  state: 'healthy' as StreamListingDependencyState,
+};
+
+export function setStreamListingDependencyState(state: StreamListingDependencyState): void {
+  streamListingDependency.state = state;
+}
+
+function encodeCursor(lastId: string): string {
+  const payload: StreamsCursor = { v: 1, lastId };
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+}
+
+function decodeCursor(cursor: string): StreamsCursor {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+  } catch {
+    throw validationError('cursor must be a valid opaque pagination token');
+  }
+
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    !('v' in parsed) ||
+    !('lastId' in parsed) ||
+    (parsed as { v?: unknown }).v !== 1 ||
+    typeof (parsed as { lastId?: unknown }).lastId !== 'string' ||
+    (parsed as { lastId: string }).lastId.trim() === ''
+  ) {
+    throw validationError('cursor must be a valid opaque pagination token');
+  }
+
+  return parsed as StreamsCursor;
+}
+
+function parseLimit(limitParam: unknown): number {
+  if (limitParam === undefined) {
+    return 50;
+  }
+
+  if (Array.isArray(limitParam) || typeof limitParam !== 'string' || !/^\d+$/.test(limitParam)) {
+    throw validationError('limit must be an integer between 1 and 100');
+  }
+
+  const parsedLimit = Number.parseInt(limitParam, 10);
+  if (parsedLimit < 1 || parsedLimit > 100) {
+    throw validationError('limit must be an integer between 1 and 100');
+  }
+
+  return parsedLimit;
+}
+
+function parseCursor(cursorParam: unknown): StreamsCursor | undefined {
+  if (cursorParam === undefined) {
+    return undefined;
+  }
+
+  if (Array.isArray(cursorParam) || typeof cursorParam !== 'string' || cursorParam.trim() === '') {
+    throw validationError('cursor must be a valid opaque pagination token');
+  }
+
+  return decodeCursor(cursorParam);
+}
+
 /**
  * GET /api/streams
- * List all streams with decimal string serialization
+ * List streams with cursor-based pagination
  */
 streamsRouter.get(
   '/',
-  asyncHandler(async (_req: Request, res: Response) => {
-    info('Listing all streams', { count: streams.length });
-    debug('Streams retrieved', { streams: streams.length });
+  asyncHandler(async (req: any, res: any) => {
+    const requestId = (req as { id?: string }).id;
+    const limit = parseLimit(req.query.limit);
+    const cursor = parseCursor(req.query.cursor);
 
-    res.json({
-      streams,
-      total: streams.length,
+    if (streamListingDependency.state !== 'healthy') {
+      warn('Stream listing dependency unavailable', {
+        dependency: 'stream-list-view',
+        requestId,
+      });
+      throw serviceUnavailable('Stream list is temporarily unavailable. Retry when dependency health is restored.');
+    }
+
+    const sortedStreams = [...streams].sort((a, b) => a.id.localeCompare(b.id));
+    const startIndex = cursor
+      ? sortedStreams.findIndex((stream) => stream.id > cursor.lastId)
+      : 0;
+
+    const normalizedStartIndex = startIndex === -1 ? sortedStreams.length : startIndex;
+    const pageStreams = sortedStreams.slice(normalizedStartIndex, normalizedStartIndex + limit);
+    const hasMore = normalizedStartIndex + pageStreams.length < sortedStreams.length;
+    const nextCursor = hasMore && pageStreams.length > 0
+      ? encodeCursor(pageStreams[pageStreams.length - 1].id)
+      : undefined;
+
+    info('Listing streams with pagination', {
+      cursorProvided: Boolean(cursor),
+      limit,
+      returned: pageStreams.length,
+      hasMore,
+      total: sortedStreams.length,
+      requestId,
     });
+    debug('Streams page computed', {
+      startIndex: normalizedStartIndex,
+      lastId: cursor?.lastId ?? null,
+      nextCursorPresent: Boolean(nextCursor),
+      requestId,
+    });
+
+    const response: {
+      streams: typeof pageStreams;
+      total: number;
+      next_cursor?: string;
+    } = {
+      streams: pageStreams,
+      total: sortedStreams.length,
+    };
+
+    if (nextCursor) {
+      response.next_cursor = nextCursor;
+    }
+
+    res.json(response);
   })
 );
 
@@ -257,9 +429,9 @@ streamsRouter.get(
  */
 streamsRouter.get(
   '/:id',
-  asyncHandler(async (req: Request, res: Response) => {
+  asyncHandler(async (req: any, res: any) => {
     const { id } = req.params;
-    const requestId = (req as Request & { id?: string }).id;
+    const requestId = (req as { id?: string }).id;
 
     debug('Fetching stream', { id, requestId });
 
@@ -282,7 +454,7 @@ streamsRouter.post(
   requireAuth,
   asyncHandler(async (req: Request, res: Response) => {
     const { sender, recipient, depositAmount, ratePerSecond, startTime, endTime } = req.body ?? {};
-    const requestId = (req as Request & { id?: string }).id;
+    const requestId = (req as { id?: string }).id;
 
     info('Creating new stream', { requestId });
 
@@ -406,7 +578,7 @@ streamsRouter.delete(
   requireAuth,
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
-    const requestId = (req as Request & { id?: string }).id;
+    const requestId = (req as { id?: string }).id;
 
     debug('Deleting stream', { id, requestId });
 
