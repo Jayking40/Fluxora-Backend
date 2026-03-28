@@ -28,7 +28,7 @@ healthRouter.get('/', (req: Request, res: Response) => {
   let indexer;
   try {
     indexer = assessIndexerHealth({
-      thresholdMs: DEFAULT_INDEXER_STALL_THRESHOLD_MS,
+      stallThresholdMs: DEFAULT_INDEXER_STALL_THRESHOLD_MS,
     });
   } catch (err) {
     indexer = { status: 'unknown' };
