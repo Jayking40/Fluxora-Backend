@@ -1,7 +1,8 @@
 import { app } from './app.js';
 import { initializeConfig, getConfig, resetConfig } from './config/env.js';
 import { info, error } from './utils/logger.js';
-import { gracefulShutdown } from './shutdown.js';
+import { gracefulShutdown, addShutdownHook } from './shutdown.js';
+import { attachWebSocketServer, closeWebSocketServer } from './websockets/streamChannel.js';
 
 async function start() {
     try {
@@ -16,6 +17,12 @@ async function start() {
                 pid: process.pid,
             });
         });
+
+        // Attach WebSocket server to the same HTTP server
+        attachWebSocketServer(server);
+
+        // Register WS teardown before HTTP server closes
+        addShutdownHook(closeWebSocketServer);
 
         // Initialize graceful shutdown handler
         gracefulShutdown(server);

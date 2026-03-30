@@ -9,6 +9,7 @@ Express + TypeScript API for the Fluxora treasury streaming protocol. Today this
   - decimal-string validation for amount fields
   - indexer freshness classification for `healthy`, `starting`, `stalled`, and `not_configured`
   - consumer-side webhook signing and verification helpers in `src/webhooks/signature.ts`
+  - WebSocket channel for real-time stream updates at `ws://<host>/ws/streams`
 - Explicitly not implemented yet:
   - live webhook delivery endpoints
   - durable delivery logs or replay store
@@ -124,6 +125,70 @@ if (!verification.ok) {
 | Payload larger than `256 KiB` | Reject before parsing JSON | `413 Payload Too Large` |
 | Duplicate delivery id | Do not process the business action twice | `200 OK` after safe dedupe or `409 Conflict` |
 | Consumer overloaded | Ask sender to retry later | `429 Too Many Requests` |
+
+## WebSocket API
+
+### Endpoint
+
+```
+ws://<host>/ws/streams
+```
+
+No authentication is required to connect (auth is a documented non-goal for this release — see follow-up below).
+
+### Message schema
+
+All messages are JSON. The server only sends; clients may send subscription messages (currently ignored beyond abuse checks).
+
+**Stream event:**
+
+```json
+{
+  "event": "stream.created" | "stream.updated" | "stream.cancelled",
+  "streamId": "stream-abc123",
+  "payload": { ... },
+  "timestamp": "2026-01-01T00:00:00.000Z"
+}
+```
+
+**Degraded state notification:**
+
+```json
+{
+  "event": "service.degraded",
+  "reason": "Stellar RPC unreachable",
+  "timestamp": "2026-01-01T00:00:00.000Z"
+}
+```
+
+### Abuse prevention
+
+| Control | Limit | Client-visible outcome |
+|---------|-------|------------------------|
+| Max client message size | 4 KiB | Connection closed with code `1009` |
+| Per-connection rate limit | 10 messages / 10 s | Connection closed with code `1008` |
+| Heartbeat (ping/pong) | Every 30 s | Unresponsive clients are terminated |
+
+### Operator observability
+
+- `GET /health` includes `wsConnections` — the count of currently connected clients.
+- Connect/disconnect events are logged as structured JSON with `connectionId` and `total`.
+
+### Manual verification
+
+```bash
+# Install wscat if needed
+npm install -g wscat
+
+# Connect and watch events
+wscat -c ws://localhost:3000/ws/streams
+```
+
+### Non-goals and follow-up
+
+- **Authentication / authorization** on the WebSocket endpoint is intentionally deferred. Follow-up: add JWT or API-key validation on upgrade.
+- **Message replay / durable event log** — events are fire-and-forget; clients that disconnect miss events. Follow-up: add a replay store.
+- **Per-stream subscription filtering** — all clients receive all events. Follow-up: add a subscription message protocol.
 
 ## Health and observability
 

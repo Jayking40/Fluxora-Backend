@@ -4,6 +4,7 @@ import { successResponse, errorResponse } from '../utils/response.js';
 import { HealthCheckManager } from '../config/health.js';
 import { Logger } from '../config/logger.js';
 import { Config } from '../config/env.js';
+import { getConnectionCount } from '../websockets/streamChannel.js';
 
 import { isShuttingDown } from '../shutdown.js';
 
@@ -35,6 +36,7 @@ healthRouter.get('/', (req: Request, res: Response) => {
     service: 'fluxora-backend',
     network: config?.stellarNetwork ?? 'unknown',
     timestamp: new Date().toISOString(),
+    wsConnections: getConnectionCount(),
     dependencies: {
       indexer,
     },
