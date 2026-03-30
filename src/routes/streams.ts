@@ -187,7 +187,7 @@ streamsRouter.delete(
   '/:id',
   authenticate,
   requireAuth,
-  asyncHandler(async (req: Request, res: Response) => {
+  asyncHandler(async (req: any, res: any) => {
     const { id } = req.params;
     const requestId = (req as any).id;
 
@@ -213,5 +213,15 @@ streamsRouter.delete(
 
     info('Stream cancelled in PG', { id, requestId });
     res.json({ message: 'Stream cancelled', id });
+
+    const config = getConfig();
+    if (config.webhookUrl && config.webhookSecret) {
+      dispatchWebhook({
+        url: config.webhookUrl,
+        secret: config.webhookSecret,
+        event: 'stream.deleted',
+        payload: streams[index],
+      }).catch((err) => error('Failed to dispatch deletion webhook', { streamId: id }, err as Error));
+    }
   })
 );
