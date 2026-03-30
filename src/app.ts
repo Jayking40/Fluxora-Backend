@@ -6,14 +6,21 @@
  */
 
 import express from 'express';
+import helmet from 'helmet';
 import { streamsRouter } from './routes/streams.js';
 import { healthRouter } from './routes/health.js';
 import { privacyRouter } from './routes/privacy.js';
 import { privacyHeaders, requestLogger, safeErrorHandler } from './middleware/pii.js';
 
-export function createApp(): express.Express {
+export interface CreateAppOptions {
+  includeTestRoutes?: boolean;
+}
+
+export function createApp(_options?: CreateAppOptions): express.Express {
   const app = express();
 
+  app.disable('x-powered-by');
+  app.use(helmet());
   app.use(express.json());
   app.use(privacyHeaders);
   app.use(requestLogger);
@@ -34,3 +41,5 @@ export function createApp(): express.Express {
 
   return app;
 }
+
+export const app = createApp();

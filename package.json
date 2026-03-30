@@ -5,18 +5,17 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.cjs --watch",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.cjs --runInBand && node --import tsx --test src/webhooks/signature.test.ts",
-    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.cjs --runInBand --coverage",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "test:webhooks-signature": "node --import tsx --test src/webhooks/signature.test.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.8.0",
     "express": "^4.18.2",
+    "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
     "stellar-sdk": "^13.3.0",
     "zod": "^4.3.6"

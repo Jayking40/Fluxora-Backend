@@ -14,9 +14,10 @@ import {
   conflictError,
   asyncHandler,
 } from '../middleware/errorHandler.js';
-import { requireAuth } from '../middleware/auth.js';
-import { info, debug, warn } from '../utils/logger.js';
-import { verifyStreamOnChain } from '../lib/stellar.js';
+import { authenticate, requireAuth } from '../middleware/auth.js';
+import { getConfig } from '../config/env.js';
+import { dispatchWebhook } from '../webhooks/dispatcher.js';
+import { info, debug, warn, error } from '../utils/logger.js';
 
 /**
  * Streams API routes (BigInt-Safe Implementation)
@@ -134,6 +135,7 @@ streamsRouter.post(
     info('Verifying on-chain stream', { transactionHash, requestId });
 
     // Trust boundary: Verify the transaction on Stellar
+    const { verifyStreamOnChain } = await import('../lib/stellar.js');
     const verified = await verifyStreamOnChain(transactionHash);
 
     const id = `stream-${transactionHash.slice(0, 8)}`;
