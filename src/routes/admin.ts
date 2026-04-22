@@ -6,6 +6,7 @@ import {
   getReindexState,
   triggerReindex,
 } from '../state/adminState.js';
+import { recordAuditEvent } from '../lib/auditLog.js';
 
 export const adminRouter = Router();
 
@@ -61,7 +62,22 @@ adminRouter.put('/pause', (req, res) => {
     return;
   }
 
+  const previous = getPauseFlags();
   const updated = setPauseFlags({ streamCreation, ingestion });
+
+  recordAuditEvent(
+    'PAUSE_FLAGS_UPDATED',
+    'pauseFlags',
+    'system',
+    (req as any).correlationId,
+    {
+      previous,
+      updated,
+      ...(streamCreation !== undefined ? { streamCreation } : {}),
+      ...(ingestion !== undefined ? { ingestion } : {}),
+    },
+  );
+
   res.json({ message: 'Pause flags updated.', pauseFlags: updated });
 });
 
@@ -88,6 +104,15 @@ adminRouter.post('/reindex', async (_req, res) => {
   }
 
   const state = await triggerReindex();
+
+  recordAuditEvent(
+    'REINDEX_TRIGGERED',
+    'reindex',
+    'system',
+    (_req as any).correlationId,
+    { status: state.status, startedAt: state.startedAt },
+  );
+
   res.status(202).json({
     message: 'Reindex started.',
     reindex: state,

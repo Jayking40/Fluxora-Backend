@@ -4,6 +4,7 @@ import { streamsRouter } from './routes/streams.js';
 import { healthRouter } from './routes/health.js';
 import { indexerRouter } from './routes/indexer.js';
 import { auditRouter } from './routes/audit.js';
+import { adminRouter } from './routes/admin.js';
 import { dlqRouter } from './routes/dlq.js';
 import { correlationIdMiddleware } from './middleware/correlationId.js';
 import { corsAllowlistMiddleware } from './middleware/cors.js';
@@ -44,6 +45,7 @@ export function createApp(options: AppOptions = {}): Express {
   app.use('/api/streams', streamsRouter);
   app.use('/internal/indexer', indexerRouter);
   app.use('/api/audit', auditRouter);
+  app.use('/api/admin', adminRouter);
   app.use('/admin/dlq', dlqRouter);
 
   app.get('/', (_req: Request, res: Response) => {
