@@ -22,7 +22,7 @@
 
 import { logger } from './logger.js';
 
-export type AuditAction = 'STREAM_CREATED' | 'STREAM_CANCELLED';
+export type AuditAction = 'STREAM_CREATED' | 'STREAM_CANCELLED' | 'WEBHOOK_SECRET_ROTATED';
 
 export interface AuditEntry {
   /** Monotonically increasing sequence number within this process lifetime. */

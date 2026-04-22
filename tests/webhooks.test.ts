@@ -2,6 +2,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { WebhookService } from '../src/webhooks/service.js';
 import { webhookDeliveryStore } from '../src/webhooks/store.js';
 import type { WebhookEvent } from '../src/webhooks/types.js';
+import {
+  computeWebhookSignature,
+  verifyWebhookSignature,
+} from '../src/webhooks/signature.js';
+import { recordAuditEvent, getAuditEntries, _resetAuditLog } from '../src/lib/auditLog.js';
 
 // Mock fetch for testing
 const originalFetch = global.fetch;
@@ -237,5 +242,125 @@ describe('WebhookService', () => {
 
     // Now it should be detected as duplicate
     expect(service.isDuplicateDelivery(delivery1.deliveryId)).toBe(true);
+  });
+});
+
+describe('webhook secret rotation (dual-valid window)', () => {
+  const rawBody = '{"event":"stream.created"}';
+  const timestamp = '1710000000';
+  const now = 1710000000;
+
+  it('accepts a signature made with the current secret', () => {
+    const sig = computeWebhookSignature('new-secret', timestamp, rawBody);
+    const result = verifyWebhookSignature({
+      secret: 'new-secret',
+      secretPrevious: 'old-secret',
+      deliveryId: 'deliv_1',
+      timestamp,
+      signature: sig,
+      rawBody,
+      now,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.usedPreviousSecret).toBeUndefined();
+  });
+
+  it('accepts a signature made with the previous secret during rotation window', () => {
+    const sig = computeWebhookSignature('old-secret', timestamp, rawBody);
+    const result = verifyWebhookSignature({
+      secret: 'new-secret',
+      secretPrevious: 'old-secret',
+      deliveryId: 'deliv_2',
+      timestamp,
+      signature: sig,
+      rawBody,
+      now,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.usedPreviousSecret).toBe(true);
+  });
+
+  it('rejects when signature matches neither secret', () => {
+    const sig = computeWebhookSignature('totally-wrong', timestamp, rawBody);
+    const result = verifyWebhookSignature({
+      secret: 'new-secret',
+      secretPrevious: 'old-secret',
+      deliveryId: 'deliv_3',
+      timestamp,
+      signature: sig,
+      rawBody,
+      now,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('signature_mismatch');
+  });
+
+  it('rejects when no previous secret is set and signature uses an old key', () => {
+    const sig = computeWebhookSignature('old-secret', timestamp, rawBody);
+    const result = verifyWebhookSignature({
+      secret: 'new-secret',
+      deliveryId: 'deliv_4',
+      timestamp,
+      signature: sig,
+      rawBody,
+      now,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('signature_mismatch');
+  });
+
+  it('still enforces timestamp tolerance with dual secrets', () => {
+    const sig = computeWebhookSignature('old-secret', timestamp, rawBody);
+    const result = verifyWebhookSignature({
+      secret: 'new-secret',
+      secretPrevious: 'old-secret',
+      deliveryId: 'deliv_5',
+      timestamp,
+      signature: sig,
+      rawBody,
+      now: 1710000000 + 9999, // way outside tolerance
+    });
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('timestamp_outside_tolerance');
+  });
+
+  it('still detects duplicate deliveries with dual secrets', () => {
+    const sig = computeWebhookSignature('old-secret', timestamp, rawBody);
+    const result = verifyWebhookSignature({
+      secret: 'new-secret',
+      secretPrevious: 'old-secret',
+      deliveryId: 'deliv_dup_rotation',
+      timestamp,
+      signature: sig,
+      rawBody,
+      now,
+      isDuplicateDelivery: () => true,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('duplicate_delivery');
+  });
+});
+
+describe('audit log — WEBHOOK_SECRET_ROTATED', () => {
+  beforeEach(() => _resetAuditLog());
+
+  it('records a rotation event', () => {
+    recordAuditEvent('WEBHOOK_SECRET_ROTATED', 'webhook', 'global', 'corr-abc', {
+      rotatedBy: 'admin',
+    });
+    const entries = getAuditEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].action).toBe('WEBHOOK_SECRET_ROTATED');
+    expect(entries[0].resourceType).toBe('webhook');
+    expect(entries[0].correlationId).toBe('corr-abc');
+    expect(entries[0].meta?.rotatedBy).toBe('admin');
+  });
+
+  it('seq increments across rotation events', () => {
+    recordAuditEvent('WEBHOOK_SECRET_ROTATED', 'webhook', 'global');
+    recordAuditEvent('WEBHOOK_SECRET_ROTATED', 'webhook', 'global');
+    const entries = getAuditEntries();
+    expect(entries[0].seq).toBe(1);
+    expect(entries[1].seq).toBe(2);
   });
 });
