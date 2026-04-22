@@ -47,19 +47,36 @@ describe('GET /health — normal operation', () => {
 });
 
 describe('GET /health — during shutdown', () => {
-  // The beforeEach block that simulated shutdown is removed,
-  // as tests now directly set app.locals.isShuttingDown = true.
-
-  it('returns 503', async () => {
+  it('returns 503 with shutting_down status', async () => {
     process.env['FLUXORA_SHUTDOWN'] = 'true';
     const res = await request(app).get('/health').expect(503);
     expect(res.body.status).toBe('shutting_down');
+    expect(res.body.service).toBe('fluxora-backend');
+    expect(res.body.message).toBe('Service is shutting down');
+    expect(typeof res.body.timestamp).toBe('string');
   });
 
   it('includes service and timestamp even during shutdown', async () => {
-    const res = await request(app).get('/health');
+    (globalThis as any)['__FLUXORA_SHUTDOWN__'] = true;
+    const res = await request(app).get('/health').expect(503);
     expect(res.body.service).toBe('fluxora-backend');
     expect(typeof res.body.timestamp).toBe('string');
+    expect(res.body.status).toBe('shutting_down');
+  });
+});
+
+describe('GET /health/ready — during shutdown', () => {
+  it('returns 503 with SERVICE_SHUTTING_DOWN error', async () => {
+    process.env['FLUXORA_SHUTDOWN'] = 'true';
+    const res = await request(app).get('/health/ready').expect(503);
+    expect(res.body.error.code).toBe('SERVICE_SHUTTING_DOWN');
+    expect(res.body.error.message).toBe('Service is shutting down');
+  });
+
+  it('returns 503 when global shutdown flag is set', async () => {
+    (globalThis as any)['__FLUXORA_SHUTDOWN__'] = true;
+    const res = await request(app).get('/health/ready').expect(503);
+    expect(res.body.error.code).toBe('SERVICE_SHUTTING_DOWN');
   });
 });
 
