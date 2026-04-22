@@ -16,10 +16,12 @@ import http from 'http';
 import { WebSocket } from 'ws';
 import {
   StreamHub,
+  StreamHubOptions,
   MAX_MESSAGE_BYTES,
   RATE_LIMIT_MAX,
   RATE_LIMIT_WINDOW_MS,
 } from '../src/ws/hub.js';
+import { InMemoryDedupCache } from '../src/redis/dedup.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -118,7 +120,7 @@ describe('WebSocket hub — connection lifecycle', () => {
 
     // Broadcast before disconnect — should reach the client.
     const msgPromise = nextMessage(ws);
-    hub.broadcast({ streamId: 'stream-1', eventId: 'evt-1', payload: { foo: 'bar' } });
+    await hub.broadcast({ streamId: 'stream-1', eventId: 'evt-1', payload: { foo: 'bar' } });
     const msg = await msgPromise;
     expect((msg as any).type).toBe('stream_update');
 
@@ -126,9 +128,9 @@ describe('WebSocket hub — connection lifecycle', () => {
     await sleep(50);
 
     // After disconnect, broadcast should not throw.
-    hub._resetDedup();
-    expect(() =>
-      hub.broadcast({ streamId: 'stream-1', eventId: 'evt-1', payload: {} }),
+    await hub._resetDedup();
+    expect(async () =>
+      await hub.broadcast({ streamId: 'stream-1', eventId: 'evt-1', payload: {} }),
     ).not.toThrow();
   });
 });
@@ -157,7 +159,7 @@ describe('WebSocket hub — subscribe / unsubscribe', () => {
     subscriber.on('message', (d) => received.push(JSON.parse(d.toString())));
     bystander.on('message', (d) => received.push(JSON.parse(d.toString())));
 
-    hub.broadcast({ streamId: 'stream-42', eventId: 'e1', payload: { amount: '100' } });
+    await hub.broadcast({ streamId: 'stream-42', eventId: 'e1', payload: { amount: '100' } });
     await sleep(50);
 
     expect(received).toHaveLength(1);
@@ -178,7 +180,7 @@ describe('WebSocket hub — subscribe / unsubscribe', () => {
     const received: unknown[] = [];
     ws.on('message', (d) => received.push(d));
 
-    hub.broadcast({ streamId: 'stream-7', eventId: 'e2', payload: {} });
+    await hub.broadcast({ streamId: 'stream-7', eventId: 'e2', payload: {} });
     await sleep(50);
 
     expect(received).toHaveLength(0);
@@ -228,8 +230,8 @@ describe('WebSocket hub — duplicate delivery prevention', () => {
     const received: unknown[] = [];
     ws.on('message', (d) => received.push(JSON.parse(d.toString())));
 
-    hub.broadcast({ streamId: 'stream-dup', eventId: 'evt-dup', payload: {} });
-    hub.broadcast({ streamId: 'stream-dup', eventId: 'evt-dup', payload: {} }); // duplicate
+    await hub.broadcast({ streamId: 'stream-dup', eventId: 'evt-dup', payload: {} });
+    await hub.broadcast({ streamId: 'stream-dup', eventId: 'evt-dup', payload: {} }); // duplicate
     await sleep(50);
 
     expect(received).toHaveLength(1);
@@ -244,9 +246,9 @@ describe('WebSocket hub — duplicate delivery prevention', () => {
     const received: unknown[] = [];
     ws.on('message', (d) => received.push(JSON.parse(d.toString())));
 
-    hub.broadcast({ streamId: 'stream-multi', eventId: 'e-1', payload: {} });
-    hub.broadcast({ streamId: 'stream-multi', eventId: 'e-2', payload: {} });
-    hub.broadcast({ streamId: 'stream-multi', eventId: 'e-3', payload: {} });
+    await hub.broadcast({ streamId: 'stream-multi', eventId: 'e-1', payload: {} });
+    await hub.broadcast({ streamId: 'stream-multi', eventId: 'e-2', payload: {} });
+    await hub.broadcast({ streamId: 'stream-multi', eventId: 'e-3', payload: {} });
     await sleep(50);
 
     expect(received).toHaveLength(3);
@@ -409,8 +411,8 @@ describe('WebSocket hub — RPC dependency failure modes', () => {
     ws.on('message', (d) => received.push(JSON.parse(d.toString())));
 
     // Simulate RPC recovery: indexer pushes events after downtime.
-    hub.broadcast({ streamId: 'stream-recovery', eventId: 'recovery-1', payload: { status: 'active' } });
-    hub.broadcast({ streamId: 'stream-recovery', eventId: 'recovery-2', payload: { status: 'completed' } });
+    await hub.broadcast({ streamId: 'stream-recovery', eventId: 'recovery-1', payload: { status: 'active' } });
+    await hub.broadcast({ streamId: 'stream-recovery', eventId: 'recovery-2', payload: { status: 'completed' } });
     await sleep(50);
 
     expect(received).toHaveLength(2);
@@ -426,12 +428,59 @@ describe('WebSocket hub — RPC dependency failure modes', () => {
     ws.on('message', (d) => received.push(JSON.parse(d.toString())));
 
     // RPC retries the same event three times (common in at-least-once delivery).
-    hub.broadcast({ streamId: 'stream-retry', eventId: 'rpc-evt-1', payload: {} });
-    hub.broadcast({ streamId: 'stream-retry', eventId: 'rpc-evt-1', payload: {} });
-    hub.broadcast({ streamId: 'stream-retry', eventId: 'rpc-evt-1', payload: {} });
+    await hub.broadcast({ streamId: 'stream-retry', eventId: 'rpc-evt-1', payload: {} });
+    await hub.broadcast({ streamId: 'stream-retry', eventId: 'rpc-evt-1', payload: {} });
+    await hub.broadcast({ streamId: 'stream-retry', eventId: 'rpc-evt-1', payload: {} });
     await sleep(50);
 
     expect(received).toHaveLength(1);
     ws.close();
+  });
+});
+
+describe('WebSocket hub — Redis-backed dedup', () => {
+  let server: http.Server;
+  let hub: StreamHub;
+  let port: number;
+  let mockDedup: InMemoryDedupCache;
+
+  beforeEach(async () => {
+    mockDedup = new InMemoryDedupCache();
+    const options: StreamHubOptions = { dedupCache: mockDedup };
+    server = http.createServer();
+    hub = new StreamHub(server, options);
+    port = await new Promise((resolve) => {
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address() as { port: number };
+        resolve(addr.port);
+      });
+    });
+  });
+
+  afterEach(async () => {
+    await hub.close();
+  });
+
+  it('uses injected dedup cache', async () => {
+    const ws = await connect(port);
+    send(ws, { type: 'subscribe', streamId: 'stream-redis' });
+    await sleep(30);
+
+    const received: unknown[] = [];
+    ws.on('message', (d) => received.push(JSON.parse(d.toString())));
+
+    await hub.broadcast({ streamId: 'stream-redis', eventId: 'evt-redis-1', payload: {} });
+    await hub.broadcast({ streamId: 'stream-redis', eventId: 'evt-redis-1', payload: {} });
+    await sleep(50);
+
+    expect(received).toHaveLength(1);
+    expect(mockDedup.has('stream-redis', 'evt-redis-1')).resolves.toBe(true);
+    ws.close();
+  });
+
+  it('clears injected dedup on reset', async () => {
+    await mockDedup.add('stream-1', 'evt-1');
+    await hub._resetDedup();
+    await expect(mockDedup.has('stream-1', 'evt-1')).resolves.toBe(false);
   });
 });
