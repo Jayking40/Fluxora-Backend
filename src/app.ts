@@ -51,6 +51,7 @@ export function createApp(options: AppOptions = {}): Express {
   app.use('/internal/indexer', indexerRouter);
   app.use('/api/audit', auditRouter);
   app.use('/admin/dlq', dlqRouter);
+  app.use('/api/admin', adminRouter);
 
   app.get('/', (_req: Request, res: Response) => {
     res.json({
