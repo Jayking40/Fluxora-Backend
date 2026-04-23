@@ -49,6 +49,8 @@
 import { WebSocket, WebSocketServer } from 'ws';
 import type { IncomingMessage } from 'http';
 import type { Server } from 'http';
+import type { DedupCache as IDedupCache } from '../redis/dedup.js';
+import { InMemoryDedupCache } from '../redis/dedup.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -113,37 +115,11 @@ interface ClientState {
   messageTimestamps: number[];
 }
 
-// ── Dedup cache ───────────────────────────────────────────────────────────────
-
-/**
- * LRU-style dedup cache: tracks (streamId:eventId) pairs that have already
- * been broadcast. Evicts oldest entries when the cache exceeds DEDUP_CACHE_MAX.
- */
-class DedupCache {
-  private readonly seen = new Map<string, true>();
-
-  has(streamId: string, eventId: string): boolean {
-    return this.seen.has(`${streamId}:${eventId}`);
-  }
-
-  add(streamId: string, eventId: string): void {
-    const key = `${streamId}:${eventId}`;
-    if (this.seen.has(key)) return;
-    if (this.seen.size >= DEDUP_CACHE_MAX) {
-      // Evict the oldest entry (Map preserves insertion order).
-      const oldest = this.seen.keys().next().value;
-      if (oldest !== undefined) this.seen.delete(oldest);
-    }
-    this.seen.set(key, true);
-  }
-
-  /** Clear all entries (for testing). */
-  clear(): void {
-    this.seen.clear();
-  }
-}
-
 // ── Hub ───────────────────────────────────────────────────────────────────────
+
+export interface StreamHubOptions {
+  dedupCache?: IDedupCache;
+}
 
 export class StreamHub {
   private readonly wss: WebSocketServer;
@@ -165,8 +141,17 @@ export class StreamHub {
   private dropBytes: number = BACKPRESSURE_DROP_BYTES;
   private terminateBytes: number = BACKPRESSURE_TERMINATE_BYTES;
 
-  constructor(server: Server) {
+  constructor(server: Server, options?: StreamHubOptions) {
     this.wss = new WebSocketServer({ server, path: '/ws/streams' });
+
+    if (options?.dedupCache) {
+      this.dedup = options.dedupCache;
+      this.ownsDedup = false;
+    } else {
+      this.dedup = new InMemoryDedupCache();
+      this.ownsDedup = true;
+    }
+
     this.wss.on('connection', (ws: WebSocket, _req: IncomingMessage) => {
       this.onConnect(ws);
     });
@@ -312,13 +297,13 @@ export class StreamHub {
    * serialization guarantee for chain/API amount fields (no Number coercion
    * occurs in the hub).
    */
-  broadcast(event: StreamUpdateEvent): void {
+  async broadcast(event: StreamUpdateEvent): Promise<void> {
     const { streamId, eventId, payload } = event;
 
-    if (this.dedup.has(streamId, eventId)) {
-      return; // already delivered
+    if (await this.dedup.has(streamId, eventId)) {
+      return;
     }
-    this.dedup.add(streamId, eventId);
+    await this.dedup.add(streamId, eventId);
 
     const subscribers = this.subscriptions.get(streamId);
     if (!subscribers || subscribers.size === 0) return;
@@ -414,13 +399,16 @@ export class StreamHub {
   }
 
   /** Close the underlying WebSocket server (for graceful shutdown). */
-  close(cb?: () => void): void {
+  async close(cb?: () => void): Promise<void> {
+    if (this.ownsDedup) {
+      await this.dedup.close();
+    }
     this.wss.close(cb);
   }
 
   /** Reset dedup cache (for testing). */
-  _resetDedup(): void {
-    this.dedup.clear();
+  async _resetDedup(): Promise<void> {
+    await this.dedup.clear();
   }
 
   /** Reset metrics counters (for testing). */
