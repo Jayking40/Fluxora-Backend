@@ -802,6 +802,268 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+/admin/dlq:
+    get:
+      summary: List dead-letter queue entries (admin only)
+      operationId: listDlqEntries
+      tags:
+        - Admin
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+          description: Maximum number of entries to return
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: Number of entries to skip
+        - name: topic
+          in: query
+          schema:
+            type: string
+          description: Filter by topic name
+      responses:
+        '200':
+          description: Paginated DLQ entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DlqEntry'
+                  total:
+                    type: integer
+                    description: Total number of entries
+                  limit:
+                    type: integer
+                    description: Page size limit
+                  offset:
+                    type: integer
+                    description: Number of entries skipped
+                  has_more:
+                    type: boolean
+                    description: Whether more entries are available
+        '400':
+          description: Invalid pagination parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authentication
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Operator role required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      summary: Purge all DLQ entries (admin only)
+      operationId: purgeDlqEntries
+      tags:
+        - Admin
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: topic
+          in: query
+          schema:
+            type: string
+          description: Filter by topic name (optional, purges all if not specified)
+      responses:
+        '200':
+          description: DLQ entries purged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: DLQ entries purged
+                  purged:
+                    type: integer
+                    description: Number of entries purged
+                  topicFilter:
+                    type: string
+                    description: Topic filter applied (or 'all')
+                  removedIds:
+                    type: array
+                    items:
+                      type: string
+                    description: IDs of removed entries
+        '401':
+          description: Missing or invalid authentication
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Operator role required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/dlq/{id}:
+    get:
+      summary: Get a single DLQ entry (admin only)
+      operationId: getDlqEntry
+      tags:
+        - Admin
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: DLQ entry ID
+      responses:
+        '200':
+          description: DLQ entry
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entry:
+                    $ref: '#/components/schemas/DlqEntry'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      summary: Remove (acknowledge) a DLQ entry (admin only)
+      operationId: deleteDlqEntry
+      tags:
+        - Admin
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: DLQ entry ID
+      responses:
+        '200':
+          description: Entry removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: DLQ entry removed
+                  id:
+                    type: string
+                    description: ID of removed entry
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/dlq/{id}/replay:
+    post:
+      summary: Replay a DLQ entry (admin only)
+      operationId: replayDlqEntry
+      tags:
+        - Admin
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: DLQ entry ID
+      responses:
+        '200':
+          description: DLQ entry replayed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: DLQ entry replayed
+                  id:
+                    type: string
+                    description: ID of replayed entry
+                  topic:
+                    type: string
+                    description: Topic of replayed entry
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   schemas:
     CreateStreamRequest:
@@ -1390,6 +1652,47 @@ components:
           type: integer
           description: Age threshold for cleanup
           example: 7
+
+    DlqEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          description: DLQ entry identifier
+          example: dlq-1646992800000-abc123
+        topic:
+          type: string
+          description: Event topic
+          example: stream.created
+        payload:
+          type: object
+          description: Event payload
+          example:
+            streamId: stream_123
+            amount: "1000000000"
+        error:
+          type: string
+          description: Error message
+          example: Connection timeout
+        attempts:
+          type: integer
+          description: Number of retry attempts
+          example: 3
+        firstFailedAt:
+          type: string
+          format: date-time
+          description: When the entry first failed
+          example: '2024-03-10T12:00:00Z'
+        lastFailedAt:
+          type: string
+          format: date-time
+          description: When the entry last failed
+          example: '2024-03-10T12:05:00Z'
+        correlationId:
+          type: string
+          nullable: true
+          description: Optional correlation ID
+          example: corr-123
 
   securitySchemes:
     BearerAuth:
