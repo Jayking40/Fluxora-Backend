@@ -69,6 +69,15 @@ export class CircuitBreaker {
 
   getState(): CircuitState { return this.state; }
 
+  /** Number of failures currently in the rolling window. */
+  getFailureCount(): number {
+    this.evictOldFailures();
+    return this.failures.length;
+  }
+
+  /** Epoch ms when the breaker last tripped to OPEN, or 0 if never. */
+  getOpenedAt(): number { return this.openedAt; }
+
   /** Execute fn through the breaker. Throws CircuitOpenError if OPEN. */
   async call<T>(fn: () => Promise<T>): Promise<T> {
     this.evictOldFailures();
@@ -145,6 +154,23 @@ export class StellarRpcService {
   /** Reset the circuit breaker (manual recovery). */
   resetCircuit(): void { this.breaker.reset(); }
 
+  /**
+   * Returns a point-in-time snapshot of the circuit breaker for
+   * health endpoints and the degradation middleware.
+   */
+  getDegradationSnapshot(): DegradationSnapshot {
+    const state = this.breaker.getState();
+    const failureCount = this.breaker.getFailureCount();
+    const openedAt = this.breaker.getOpenedAt();
+    return {
+      circuitState: state,
+      failureCount,
+      degraded: state === 'OPEN' || state === 'HALF_OPEN',
+      openedAt: openedAt > 0 ? new Date(openedAt).toISOString() : null,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
   async getLatestLedger(): Promise<{ sequence: number }> {
     return this.breaker.call(() => this.callWithTimeout(
       () => this.getClient().getLatestLedger(),
@@ -181,6 +207,16 @@ export class StellarRpcService {
       throw new RpcProviderError(message, statusCode, durationMs);
     }
   }
+}
+
+// ── Degradation snapshot ──────────────────────────────────────────────────────
+
+export interface DegradationSnapshot {
+  circuitState: CircuitState;
+  failureCount: number;
+  degraded: boolean;
+  openedAt: string | null;
+  timestamp: string;
 }
 
 // ── Singleton ─────────────────────────────────────────────────────────────────
